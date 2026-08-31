@@ -4,29 +4,29 @@ const mongoose = require("mongoose");
 require("dotenv").config();
 
 const Task = require("./models/Task");
+const authRoutes = require("./routes/auth");
+const protect = require("./middleware/authMiddleware");
+const validateTask = require("./middleware/validationMiddleware");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
+// ===============================
+// Core Middleware
+// ===============================
 app.use(express.json());
 app.use(cors());
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGO_URI)
-    .then(() => {
-        console.log("MongoDB connected successfully");
+// ===============================
+// Authentication Routes
+// Mounted at /auth and /api/auth
+// ===============================
+app.use("/auth", authRoutes);
+app.use("/api/auth", authRoutes);
 
-        app.listen(PORT, () => {
-            console.log(`Server is running on port ${PORT}`);
-        });
-    })
-    .catch((error) => {
-        console.error("MongoDB connection failed:", error.message);
-    });
-
-
-// Home route
+// ===============================
+// Home Route / Health Check
+// ===============================
 app.get("/", (req, res) => {
     res.status(200).json({
         success: true,
@@ -34,24 +34,34 @@ app.get("/", (req, res) => {
     });
 });
 
+// ===============================
+// Task Route Handlers
+// ===============================
 
-// GET all tasks
-app.get("/tasks", async (req, res, next) => {
+// GET ALL TASKS (Protected)
+const handleGetTasks = async (req, res, next) => {
     try {
-        const tasks = await Task.find();
+        // Fetch tasks created by logged-in user or legacy tasks without user field
+        const tasks = await Task.find({
+            $or: [
+                { user: req.user.id },
+                { user: { $exists: false } },
+                { user: null }
+            ]
+        }).sort({ createdAt: -1 });
 
         res.status(200).json({
             success: true,
+            count: tasks.length,
             data: tasks
         });
     } catch (error) {
         next(error);
     }
-});
+};
 
-
-// GET task by ID
-app.get("/tasks/:id", async (req, res, next) => {
+// GET TASK BY ID (Protected)
+const handleGetTaskById = async (req, res, next) => {
     try {
         const task = await Task.findById(req.params.id);
 
@@ -66,37 +76,39 @@ app.get("/tasks/:id", async (req, res, next) => {
             success: true,
             data: task
         });
-
     } catch (error) {
         next(error);
     }
-});
+};
 
-
-// CREATE task
-app.post("/tasks", async (req, res, next) => {
+// CREATE TASK (Protected + Validated)
+const handleCreateTask = async (req, res, next) => {
     try {
-        const task = await Task.create(req.body);
+        const taskData = {
+            ...req.body,
+            user: req.user.id
+        };
+
+        const task = await Task.create(taskData);
 
         res.status(201).json({
             success: true,
+            message: "Task created successfully",
             data: task
         });
-
     } catch (error) {
         next(error);
     }
-});
+};
 
-
-// UPDATE task
-app.put("/tasks/:id", async (req, res, next) => {
+// UPDATE TASK (Protected + Validated)
+const handleUpdateTask = async (req, res, next) => {
     try {
         const task = await Task.findByIdAndUpdate(
             req.params.id,
             req.body,
             {
-                new: true,
+                returnDocument: "after",
                 runValidators: true
             }
         );
@@ -110,17 +122,16 @@ app.put("/tasks/:id", async (req, res, next) => {
 
         res.status(200).json({
             success: true,
+            message: "Task updated successfully",
             data: task
         });
-
     } catch (error) {
         next(error);
     }
-});
+};
 
-
-// DELETE task
-app.delete("/tasks/:id", async (req, res, next) => {
+// DELETE TASK (Protected)
+const handleDeleteTask = async (req, res, next) => {
     try {
         const task = await Task.findByIdAndDelete(req.params.id);
 
@@ -136,22 +147,36 @@ app.delete("/tasks/:id", async (req, res, next) => {
             message: "Task deleted successfully",
             data: task
         });
-
     } catch (error) {
         next(error);
     }
-});
+};
 
+// Bind routes for both /tasks and /api/tasks
+app.get("/tasks", protect, handleGetTasks);
+app.get("/api/tasks", protect, handleGetTasks);
 
-// Global Error Handler
+app.get("/tasks/:id", protect, handleGetTaskById);
+app.get("/api/tasks/:id", protect, handleGetTaskById);
+
+app.post("/tasks", protect, validateTask, handleCreateTask);
+app.post("/api/tasks", protect, validateTask, handleCreateTask);
+
+app.put("/tasks/:id", protect, validateTask, handleUpdateTask);
+app.put("/api/tasks/:id", protect, validateTask, handleUpdateTask);
+
+app.delete("/tasks/:id", protect, handleDeleteTask);
+app.delete("/api/tasks/:id", protect, handleDeleteTask);
+
+// ===============================
+// Global Error Handler Middleware
+// ===============================
 app.use((error, req, res, next) => {
-    console.error(error);
+    console.error("API Error:", error);
 
-    // Mongoose validation error
+    // Mongoose Validation Error
     if (error.name === "ValidationError") {
-
         const errors = {};
-
         for (const field in error.errors) {
             errors[field] = error.errors[field].message;
         }
@@ -159,10 +184,9 @@ app.use((error, req, res, next) => {
         return res.status(400).json({
             success: false,
             message: "Validation failed",
-            errors: errors
+            errors
         });
     }
-
 
     // Invalid MongoDB ObjectId
     if (error.name === "CastError") {
@@ -172,10 +196,43 @@ app.use((error, req, res, next) => {
         });
     }
 
+    // Duplicate MongoDB field
+    if (error.code === 11000) {
+        return res.status(409).json({
+            success: false,
+            message: "Duplicate value already exists"
+        });
+    }
 
-    // Other errors
+    // JWT verification errors
+    if (error.name === "JsonWebTokenError" || error.name === "TokenExpiredError") {
+        return res.status(401).json({
+            success: false,
+            message: "Invalid or expired token"
+        });
+    }
+
+    // Other Errors
     res.status(500).json({
         success: false,
         message: "Internal server error"
     });
 });
+
+// ===============================
+// MongoDB Connection & Server Start
+// ===============================
+const MONGO_URI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/taskdb";
+
+mongoose.connect(MONGO_URI)
+    .then(() => {
+        console.log("MongoDB connected successfully");
+        app.listen(PORT, () => {
+            console.log(`Server is running on port ${PORT}`);
+        });
+    })
+    .catch((error) => {
+        console.error("MongoDB connection failed:", error.message);
+    });
+
+module.exports = app;
