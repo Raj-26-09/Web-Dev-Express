@@ -17,6 +17,16 @@ const PORT = process.env.PORT || 5000;
 app.use(express.json());
 app.use(cors());
 
+// Performance & Response Time Monitoring
+app.use((req, res, next) => {
+    const start = Date.now();
+    res.on("finish", () => {
+        const duration = Date.now() - start;
+        res.setHeader("X-Response-Time", `${duration}ms`);
+    });
+    next();
+});
+
 // ===============================
 // Authentication Routes
 // Mounted at /auth and /api/auth
@@ -30,7 +40,9 @@ app.use("/api/auth", authRoutes);
 app.get("/", (req, res) => {
     res.status(200).json({
         success: true,
-        data: "Task Management API is running"
+        data: "Task Management API is running",
+        uptime: `${process.uptime().toFixed(1)}s`,
+        timestamp: new Date().toISOString()
     });
 });
 
